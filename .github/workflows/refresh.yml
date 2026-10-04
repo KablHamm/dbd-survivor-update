@@ -1,0 +1,100 @@
+# Keep survivors-update.json in step with the wiki without a PC being switched on.
+#
+# The survivor list on deadbydaylight.wiki.gg is rendered by a Lua module, so the
+# only machine-readable form of it is the rendered HTML.
+# tools/build_survivors_update.py reads that HTML, appends any character the app
+# does not already have, and writes the whole ordered roster to
+# survivors-update.json. The r1 reads this file from raw.githubusercontent.com,
+# which sends Access-Control-Allow-Origin: *, so the device can fetch it even
+# though the wiki itself sends no CORS header at all.
+#
+# Two properties are load-bearing and are asserted by the script, not by luck:
+# the order in baseline.json is never re-sorted (so a survivor keeps the
+# checkpoint slot their marks belong to), and a roster that parses as smaller
+# than the baseline aborts the run rather than being published.
+name: refresh survivor roster
+
+on:
+  schedule:
+    # 06:23 UTC, off the hour and off the perk picker's 06:17 - GitHub queues
+    # scheduled runs and they do not all start the moment they come due.
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: survivor-roster
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Seed the slot spine, once
+        id: seed
+        # baseline.json is the fixed order the app already holds. It is written
+        # by the very first run, from the roster the app was itself built with,
+        # and is never re-derived afterwards - the host address changes on every
+        # rehost, and a spine that moved would move every survivor's checkpoint.
+        run: |
+          if [ -f baseline.json ]; then
+            echo "created=0" >> "$GITHUB_OUTPUT"
+            echo "baseline.json is already committed - using it unchanged"
+          else
+            echo "no baseline.json yet - seeding it from the app's own roster"
+            curl -fsSL --retry 3 --retry-delay 5 \
+              "https://dbd-gauntlet-y9dvkz.intern.rabbitos.app/survivors.json" \
+              -o "$RUNNER_TEMP/app-roster.json"
+            python tools/seed_baseline.py "$RUNNER_TEMP/app-roster.json"
+            echo "created=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scrape the wiki and rebuild the roster
+        # pipefail: without it a scraper that dies leaves the step green on
+        # tee's exit code, the roster unchanged, and the guard below reports
+        # "unchanged" - a failed scrape would look like a successful run.
+        run: set -o pipefail; python tools/build_survivors_update.py | tee "$RUNNER_TEMP/roster.log"
+
+      - name: Has the roster actually changed
+        id: changed
+        # Not `exit_code`: a non-zero exit fails the step, and a failed step
+        # skips the next one, so the publish would never happen. The verdict is
+        # carried in an output instead. Exit 2 still fails the run on purpose -
+        # that is the rebuild being unusable, not the roster being new.
+        run: |
+          git show HEAD:survivors-update.json > "$RUNNER_TEMP/before.json" 2>/dev/null \
+            || : > "$RUNNER_TEMP/before.json"
+          code=0
+          python tools/roster_changed.py "$RUNNER_TEMP/before.json" survivors-update.json || code=$?
+          if [ "$code" -eq 2 ]; then
+            echo "the rebuilt roster is not usable - refusing to publish"
+            exit 1
+          fi
+          if [ "$code" -eq 0 ]; then echo "changed=0" >> "$GITHUB_OUTPUT";
+          else echo "changed=1" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Publish the new roster
+        if: steps.changed.outputs.changed == '1'
+        run: |
+          git config user.name  "os3 dbd gauntlet"
+          git config user.email "os3-dbd-gauntlet@users.noreply.github.com"
+          subject=$(grep -E '^[[:space:]]+\+ ' "$RUNNER_TEMP/roster.log" \
+                    | sed -E 's/^[[:space:]]+\+ //' \
+                    | head -20 | paste -sd'; ' -)
+          [ -n "$subject" ] || subject="wiki roster changed"
+          if [ "${{ steps.seed.outputs.created }}" = "1" ]; then
+            git add baseline.json survivors-update.json
+            subject="first roster feed, seeded from the app's own 54 survivors"
+          else
+            git add survivors-update.json
+          fi
+          git commit -m "$subject"
+          git push
