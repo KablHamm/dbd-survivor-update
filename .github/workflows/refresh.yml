@@ -57,7 +57,7 @@ jobs:
           else
             echo "no baseline.json yet - seeding it from the app's own roster"
             curl -fsSL --retry 3 --retry-delay 5 \
-              "https://dbd-gauntlet-y9dvkz.intern.rabbitos.app/survivors.json" \
+              "https://dbd-gauntlet-dtb5z9.intern.rabbitos.app/survivors.json" \
               -o "$RUNNER_TEMP/app-roster.json"
             python tools/seed_baseline.py "$RUNNER_TEMP/app-roster.json"
             echo "created=1" >> "$GITHUB_OUTPUT"
