@@ -20,6 +20,12 @@ on:
     # scheduled runs and they do not all start the moment they come due.
     - cron: "23 6 * * *"
   workflow_dispatch:
+  # A change to the scraper or the rules is worth a run of its own. This cannot
+  # loop: commits the workflow makes are pushed with GITHUB_TOKEN, and GitHub
+  # does not start a workflow from a push made with that token.
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
